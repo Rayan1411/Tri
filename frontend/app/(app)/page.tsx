@@ -7,11 +7,12 @@ import SearchBox from "../../components/SearchBox";
 import StockChart from "../../components/StockChart";
 
 interface Snapshot {
-  symbol: string;
+  symbol?: string;
   price?: number;
   change?: number;
   change_pct?: number;
   asset_class?: string;
+  [key: string]: any;
 }
 
 interface WatchlistItem {
@@ -99,7 +100,7 @@ export default function DashboardPage() {
         </div>
         <div className="flex-1 overflow-y-auto divide-y divide-[#2a2e39]">
           {watchlist.map((item) => {
-            const snap = item.snapshot || {};
+            const snap: Snapshot = item.snapshot || {};
             const price = snap.price;
             const changePct = snap.change_pct;
             const isSelected = item.symbol === selectedSymbol;

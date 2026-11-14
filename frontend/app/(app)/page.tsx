@@ -1,154 +1,159 @@
 "use client";
 
-import Link from "next/link";
-import { useState } from "react";
-import { del, MoverRow, Movers, post, Quote } from "@/lib/api";
-import { usePoll } from "@/lib/hooks";
-import { dir, fmtPct, fmtPrice, fmtSigned, fmtVol } from "@/lib/format";
+import { useRouter, useSearchParams } from "next/navigation";
+import React, { useEffect, useState } from "react";
+import AIChat from "../../components/AIChat";
+import SearchBox from "../../components/SearchBox";
+import StockChart from "../../components/StockChart";
 
-function MoversTable({ title, rows, showVolume }: { title: string; rows: MoverRow[]; showVolume?: boolean }) {
-  return (
-    <div className="card overflow-hidden">
-      <div className="border-b border-line px-4 py-3 font-bold">{title}</div>
-      {rows.length === 0 ? (
-        <div className="p-4 text-sm text-muted">لا توجد بيانات حاليًا</div>
-      ) : (
-        <table className="w-full">
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.symbol} className="border-b border-line/60 last:border-0 hover:bg-panel2">
-                <td className="td">
-                  <Link href={`/symbol/${r.symbol}`} className="num font-bold">
-                    {r.symbol}
-                  </Link>
-                </td>
-                <td className="td text-end">
-                  <span className="num">{fmtPrice(r.price)}</span>
-                </td>
-                {showVolume && (
-                  <td className="td text-end text-muted">
-                    <span className="num">{fmtVol(r.volume)}</span>
-                  </td>
-                )}
-                <td className={`td text-end ${dir(r.change_pct)}`}>
-                  <span className="num">{fmtPct(r.change_pct)}</span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  );
+interface Snapshot {
+  symbol: string;
+  price?: number;
+  change?: number;
+  change_pct?: number;
+  asset_class?: string;
 }
 
-export default function Dashboard() {
-  const wl = usePoll<string[]>("/watchlist");
-  const symbols = wl.data ?? [];
-  const quotes = usePoll<Record<string, Quote>>(symbols.length ? `/quotes?symbols=${symbols.join(",")}` : null, 10000);
-  const movers = usePoll<Movers>("/market/movers", 30000);
+interface WatchlistItem {
+  id: number;
+  symbol: string;
+  asset_class: string;
+  snapshot?: Snapshot;
+}
 
-  const [adding, setAdding] = useState("");
-  const [err, setErr] = useState("");
+interface TradePlan {
+  id: number;
+  symbol: string;
+  side: string;
+  entry_price: number;
+  tp1_price?: number;
+  tp2_price?: number;
+  sl_price?: number;
+  status: string;
+}
 
-  const add = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const s = adding.trim().toUpperCase();
-    if (!s) return;
-    setErr("");
-    try {
-      await post("/watchlist", { symbol: s });
-      setAdding("");
-      wl.reload();
-    } catch (er) {
-      setErr(er instanceof Error ? er.message : "تعذّرت الإضافة");
-    }
-  };
+export default function DashboardPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const assetClass = searchParams.get("asset_class") || "stock";
 
-  const remove = async (s: string) => {
-    await del(`/watchlist/${s}`);
-    wl.reload();
-  };
+  const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
+  const [selectedSymbol, setSelectedSymbol] = useState<string>("");
+  const [bars, setBars] = useState<any[]>([]);
+  const [rangeKey, setRangeKey] = useState<string>("1M");
+  const [tradePlans, setTradePlans] = useState<TradePlan[]>([]);
+  const [loadingBars, setLoadingBars] = useState<boolean>(false);
+
+  useEffect(() => {
+    const fetchDashboard = async () => {
+      try {
+        const res = await fetch(`/api/dashboard?asset_class=${assetClass}`);
+        if (res.ok) {
+          const data = await res.json();
+          const items: WatchlistItem[] = data.watchlist || [];
+          setWatchlist(items);
+          setTradePlans(data.trade_plans || []);
+
+          if (items.length > 0) {
+            const defaultSym = items[0].symbol;
+            setSelectedSymbol((prev) => (prev && items.some((i) => i.symbol === prev) ? prev : defaultSym));
+          } else {
+            setSelectedSymbol("");
+          }
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    fetchDashboard();
+  }, [assetClass]);
+
+  useEffect(() => {
+    if (!selectedSymbol) return;
+    const fetchSymbolData = async () => {
+      setLoadingBars(true);
+      try {
+        const res = await fetch(`/api/stocks/${selectedSymbol}?range=${rangeKey}`);
+        if (res.ok) {
+          const data = await res.json();
+          setBars(data.bars || []);
+          setTradePlans(data.trade_plans || []);
+        }
+      } catch (err) {
+        console.error(err);
+      } finally {
+        setLoadingBars(false);
+      }
+    };
+    fetchSymbolData();
+  }, [selectedSymbol, rangeKey]);
 
   return (
-    <div className="grid gap-4 lg:grid-cols-3">
-      <div className="card overflow-hidden lg:col-span-2">
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3">
-          <div className="font-bold">قائمة المتابعة</div>
-          <form onSubmit={add} className="flex gap-2">
-            <input
-              className="input !w-36"
-              placeholder="رمز السهم"
-              value={adding}
-              onChange={(e) => setAdding(e.target.value)}
-              dir="ltr"
-            />
-            <button className="btn">إضافة</button>
-          </form>
+    <div className="flex flex-1 overflow-hidden bg-[#121316] text-[#d1d4dc]">
+      <aside className="flex w-64 flex-none flex-col border-r border-[#2a2e39] bg-[#1e222d]">
+        <div className="p-3 border-b border-[#2a2e39]">
+          <SearchBox />
         </div>
-        {err && <div className="down border-b border-line px-4 py-2 text-sm">{err}</div>}
+        <div className="flex h-9 items-center px-3 border-b border-[#2a2e39] text-xs font-bold text-[#787b86]">
+          {assetClass === "crypto" ? "🪙 العملات الرقمية المفضلة" : "🇺🇸 الأسهم الأمريكية المفضلة"}
+        </div>
+        <div className="flex-1 overflow-y-auto divide-y divide-[#2a2e39]">
+          {watchlist.map((item) => {
+            const snap = item.snapshot || {};
+            const price = snap.price;
+            const changePct = snap.change_pct;
+            const isSelected = item.symbol === selectedSymbol;
 
-        {wl.loading ? (
-          <div className="p-6 text-sm text-muted">جارٍ التحميل…</div>
-        ) : symbols.length === 0 ? (
-          <div className="p-6 text-sm leading-7 text-muted">
-            قائمتك فارغة. أضف رمزًا من الأعلى أو افتح أي سهم من البحث واضغط «أضف للمتابعة».
-          </div>
+            return (
+              <button
+                key={item.symbol}
+                onClick={() => setSelectedSymbol(item.symbol)}
+                className={`flex w-full items-center justify-between p-3 text-right transition ${
+                  isSelected ? "bg-[#2a2e39]" : "hover:bg-[#1a1e29]"
+                }`}
+              >
+                <div>
+                  <div className="font-bold text-white text-xs">{item.symbol}</div>
+                  <div className="text-[10px] text-[#787b86]">
+                    {assetClass === "crypto" ? "Crypto" : "US Stock"}
+                  </div>
+                </div>
+                <div className="text-left">
+                  <div className="text-xs font-bold text-white">
+                    {price !== undefined ? price.toLocaleString() : "---"}
+                  </div>
+                  {changePct !== undefined && (
+                    <div className={`text-[10px] font-bold ${changePct >= 0 ? "text-green-400" : "text-red-400"}`}>
+                      {changePct >= 0 ? "+" : ""}
+                      {changePct.toFixed(2)}%
+                    </div>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+
+      <section className="flex flex-1 flex-col overflow-hidden">
+        {selectedSymbol ? (
+          <StockChart
+            symbol={selectedSymbol}
+            bars={bars}
+            rangeKey={rangeKey}
+            onRangeChange={setRangeKey}
+            tradePlans={tradePlans}
+          />
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[520px]">
-              <thead>
-                <tr className="border-b border-line">
-                  <th className="th">الرمز</th>
-                  <th className="th text-end">السعر</th>
-                  <th className="th text-end">التغير</th>
-                  <th className="th text-end">%</th>
-                  <th className="th text-end">الحجم</th>
-                  <th className="th" />
-                </tr>
-              </thead>
-              <tbody>
-                {symbols.map((s) => {
-                  const q = quotes.data?.[s];
-                  return (
-                    <tr key={s} className="border-b border-line/60 last:border-0 hover:bg-panel2">
-                      <td className="td">
-                        <Link href={`/symbol/${s}`} className="num font-bold">
-                          {s}
-                        </Link>
-                      </td>
-                      <td className="td text-end">
-                        <span className="num">{fmtPrice(q?.price)}</span>
-                      </td>
-                      <td className={`td text-end ${dir(q?.change)}`}>
-                        <span className="num">{fmtSigned(q?.change)}</span>
-                      </td>
-                      <td className={`td text-end ${dir(q?.change_pct)}`}>
-                        <span className="num">{fmtPct(q?.change_pct)}</span>
-                      </td>
-                      <td className="td text-end text-muted">
-                        <span className="num">{fmtVol(q?.volume)}</span>
-                      </td>
-                      <td className="td text-end">
-                        <button className="text-muted hover:down" onClick={() => remove(s)} aria-label="حذف">
-                          ✕
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="flex flex-1 items-center justify-center text-xs text-[#787b86]">
+            اختر رمزاً من القائمة أو ابحث عنه لعرض الشارت
           </div>
         )}
-        {quotes.error && <div className="down border-t border-line px-4 py-2 text-xs">{quotes.error}</div>}
-      </div>
+      </section>
 
-      <div className="space-y-4">
-        <MoversTable title="🟢 الأكثر ارتفاعًا" rows={movers.data?.gainers ?? []} />
-        <MoversTable title="🔴 الأكثر انخفاضًا" rows={movers.data?.losers ?? []} />
-        <MoversTable title="🔥 الأكثر تداولًا" rows={movers.data?.actives ?? []} showVolume />
-      </div>
+      <aside className="flex w-96 flex-none flex-col overflow-hidden">
+        <AIChat symbol={selectedSymbol} rangeKey={rangeKey} />
+      </aside>
     </div>
   );
 }

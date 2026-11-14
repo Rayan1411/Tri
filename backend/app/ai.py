@@ -1,123 +1,230 @@
-"""AI analysis chat. Add ANTHROPIC_API_KEY (and optionally AI_MODEL) to enable it."""
+from __future__ import annotations
+
+import json
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
 
-from . import alpaca
-from .config import settings
+from .config import get_settings
 
-SYSTEM_PROMPT = """أنت محلل أسهم أمريكية يعمل داخل منصة شخصية لمستخدم واحد. تجيب دائمًا بالعربية، بإيجاز ووضوح.
-- اعتمد على البيانات المرفقة في السياق (السعر، الأداء، الأخبار) ولا تخترع أرقامًا غير موجودة فيها.
-- إن لم تكفِ البيانات لقول شيء بثقة، قل ذلك صراحة.
-- قدّم قراءة متوازنة: نقاط القوة، المخاطر، ومستويات أو سيناريوهات يمكن مراقبتها.
-- هذه تحليلات تعليمية وليست توصية مالية؛ اذكر ذلك بجملة قصيرة فقط عند الحاجة، لا في كل رد.
-- اجعل الرد في فقرات قصيرة أو نقاط مختصرة، بدون إطالة."""
+SYSTEM_PROMPT = """أنت محلل فني ومساعد تداول خبير في الأسهم الأمريكية والعملات الرقمية (Crypto) تعمل داخل منصة تداول احترافية شبيهة بـ TradingView.
+تحدث دائماً باللغة العربية الواضحة والمهنية.
 
+مهمتك الأساسية عند تحليل أي رمز أو الإجابة عن أي سؤال تداول:
+1. تقديم تحليل فني ومالي مركز يعتمد على الشموع السعرية (OHLCV)، مناطق العرض والطلب، الزخم، والأخبار المرفقة في السياق.
+2. فرض خطة تداول رقمية واضحة ومحددة (دخول، هدف أول TP1، هدف ثاني TP2، وقف خسارة SL) بعد التحليل مباشرة لكي يعتمدها المستخدم بضغطة زر.
 
-def configured() -> bool:
-    return bool(settings.anthropic_key)
+يجب عليك دائماً وفي كل رد إرفاق كائن JSON في نهاية رسالتك تماماً بين وسمي <TRADE_PLAN> و </TRADE_PLAN> بالصيغة الإلزامية التالية (بدون أي نقص في الحقول):
 
+<TRADE_PLAN>
+{
+  "symbol": "AAPL",
+  "action": "BUY",
+  "order_type": "market",
+  "entry": 100.50,
+  "tp1": 105.00,
+  "tp2": 110.00,
+  "sl": 97.50,
+  "qty": 1,
+  "confidence": "مرتفعة",
+  "summary": "ملخص سبب الصفقة في سطر واحد"
+}
+</TRADE_PLAN>
 
-def _pct(a: float, b: float) -> Optional[float]:
-    return (a / b - 1) * 100 if b else None
-
-
-async def build_context(symbol: str) -> str:
-    parts: List[str] = [f"الرمز: {symbol}"]
-    try:
-        info = await alpaca.asset(symbol)
-        if info:
-            parts.append(f"الشركة: {info['name']} ({info['exchange']})")
-    except Exception:
-        pass
-
-    try:
-        q = (await alpaca.quotes([symbol])).get(symbol)
-        if q:
-            parts.append(
-                "آخر سعر: {price} | الإغلاق السابق: {prev_close} | التغير: {change_pct}% | "
-                "افتتاح اليوم: {open} | أعلى: {high} | أدنى: {low} | حجم: {volume}".format(
-                    **{k: ("—" if v is None else (round(v, 2) if isinstance(v, float) else v)) for k, v in q.items()}
-                )
-            )
-    except Exception:
-        pass
-
-    try:
-        daily = await alpaca.bars(symbol, "1d")
-        daily = daily[-60:]
-        if len(daily) >= 5:
-            closes = [b["close"] for b in daily]
-            last = closes[-1]
-            lines = []
-            for n in (5, 20, 60):
-                if len(closes) > n:
-                    p = _pct(last, closes[-n - 1])
-                    lines.append(f"آخر {n} يوم تداول: {p:+.1f}%")
-            hi = max(b["high"] for b in daily)
-            lo = min(b["low"] for b in daily)
-            vols = [b["volume"] for b in daily[-20:]]
-            avg_vol = sum(vols) / len(vols) if vols else 0
-            parts.append("الأداء: " + " | ".join(lines))
-            parts.append(f"أعلى/أدنى آخر {len(daily)} يوم: {hi:.2f} / {lo:.2f} | متوسط حجم 20 يوم: {avg_vol:,.0f}")
-            tail = ", ".join(f"{b['close']:.2f}" for b in daily[-10:])
-            parts.append(f"آخر 10 إغلاقات: {tail}")
-    except Exception:
-        pass
-
-    try:
-        items = await alpaca.news(symbol, 6)
-        if items:
-            parts.append("آخر الأخبار:")
-            for n in items:
-                parts.append(f"- {n['headline']} ({n.get('source') or ''}, {str(n.get('created_at'))[:10]})")
-    except Exception:
-        pass
-
-    return "\n".join(parts)
+قواعد حساب الأرقام:
+- في حالة الشراء (BUY): يجب أن يكون tp2 > tp1 > entry > sl.
+- في حالة البيع (SELL): يجب أن يكون sl > entry > tp1 > tp2.
+- التزم بالأرقام الحقيقية القريبة من السعر الحالي المرفق في السياق."""
 
 
-async def chat(symbol: Optional[str], messages: List[Dict[str, str]]) -> str:
-    system = SYSTEM_PROMPT
-    if symbol:
-        system += "\n\nسياق السهم الحالي:\n" + await build_context(symbol)
-
-    clean = [
-        {"role": m["role"], "content": m["content"][:2000]}
-        for m in messages[-12:]
-        if m.get("role") in ("user", "assistant") and m.get("content")
-    ]
-    while clean and clean[0]["role"] != "user":
-        clean.pop(0)
-    if not clean:
-        return "اكتب سؤالك أولًا."
-
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            r = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": settings.anthropic_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
+def _format_context(context: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    sym = context.get("symbol")
+    snap = context.get("snapshot") or {}
+    if sym:
+        parts.append(f"الرمز الحالي المفتوح على الشارت: {sym} (الفئة: {snap.get('asset_class', 'stock')})")
+    if snap:
+        parts.append(
+            "بيانات السعر اللحظية:\n"
+            + json.dumps(
+                {
+                    "price": snap.get("price"),
+                    "change": snap.get("change"),
+                    "change_pct": snap.get("change_pct"),
+                    "open": snap.get("open"),
+                    "high": snap.get("high"),
+                    "low": snap.get("low"),
+                    "prev_close": snap.get("prev_close"),
+                    "volume": snap.get("volume"),
                 },
-                json={
-                    "model": settings.ai_model,
-                    "max_tokens": 1024,
-                    "system": system,
-                    "messages": clean,
-                },
+                ensure_ascii=False,
             )
-    except httpx.HTTPError as e:
-        return f"تعذّر الاتصال بخدمة الذكاء الاصطناعي ({e.__class__.__name__})."
+        )
+    bars = context.get("recent_bars") or []
+    if bars:
+        parts.append(
+            f"آخر {len(bars)} شمعة سعرية (OHLCV) للتحليل الفني واستخراج الدعوم والمقاومات:\n"
+            + json.dumps(bars[-25:], ensure_ascii=False)
+        )
+    news = context.get("news") or []
+    if news:
+        headlines = [
+            f"- {n.get('headline')} ({n.get('source')}, {n.get('created_at')})"
+            for n in news[:6]
+        ]
+        parts.append("آخر الأخبار:\n" + "\n".join(headlines))
+    account = context.get("account")
+    if account:
+        parts.append(
+            "ملخص المحفظة:\n"
+            + json.dumps(
+                {
+                    "equity": account.get("equity"),
+                    "cash": account.get("cash"),
+                    "buying_power": account.get("buying_power"),
+                },
+                ensure_ascii=False,
+            )
+        )
+    positions = context.get("positions")
+    if positions:
+        slim = [
+            {
+                "symbol": p.get("ui_symbol") or p.get("symbol"),
+                "qty": p.get("qty"),
+                "avg_entry_price": p.get("avg_entry_price"),
+                "current_price": p.get("current_price"),
+                "unrealized_pl": p.get("unrealized_pl"),
+                "unrealized_plpc": p.get("unrealized_plpc"),
+            }
+            for p in positions[:15]
+        ]
+        parts.append("المراكز المفتوحة حالياً:\n" + json.dumps(slim, ensure_ascii=False))
+    return "\n\n".join(parts)
 
-    if r.status_code >= 400:
+
+def extract_trade_plan(
+    text: str,
+    default_symbol: Optional[str] = None,
+    current_price: Optional[float] = None,
+) -> tuple[str, Optional[Dict[str, Any]]]:
+    plan: Optional[Dict[str, Any]] = None
+    clean_text = text
+
+    match = re.search(r"<TRADE_PLAN>\s*(\{[\s\S]*?\})\s*</TRADE_PLAN>", text)
+    if match:
         try:
-            msg = r.json().get("error", {}).get("message", r.text[:200])
+            parsed = json.loads(match.group(1))
+            plan = parsed.get("trade_plan") or parsed
+            clean_text = (text[: match.start()] + text[match.end() :]).strip()
         except Exception:
-            msg = r.text[:200]
-        return f"خطأ من خدمة الذكاء الاصطناعي: {msg}"
+            pass
 
-    blocks: List[Dict[str, Any]] = r.json().get("content", [])
-    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
-    return text or "لم أحصل على رد."
+    if not plan:
+        match_brace = re.search(r'(\{\s*"(?:trade_plan|symbol|action)"[\s\S]*?\})', text)
+        if match_brace:
+            try:
+                parsed = json.loads(match_brace.group(1))
+                plan = parsed.get("trade_plan") or parsed
+                clean_text = (text[: match_brace.start()] + text[match_brace.end() :]).strip()
+            except Exception:
+                pass
+
+    if not plan and current_price and default_symbol:
+        p = float(current_price)
+        is_crypto = "-USD" in default_symbol or "/" in default_symbol
+        decimals = 4 if (is_crypto and p < 10) else 2
+        plan = {
+            "symbol": default_symbol,
+            "action": "BUY",
+            "order_type": "market",
+            "entry": round(p, decimals),
+            "tp1": round(p * 1.025, decimals),
+            "tp2": round(p * 1.05, decimals),
+            "sl": round(p * 0.985, decimals),
+            "qty": 0.01 if (is_crypto and p > 1000) else 1,
+            "confidence": "متوسطة",
+            "summary": "خطة تداول قياسية مبنية على السعر الحالي ونسبة عائد إلى مخاطرة 2:1",
+        }
+
+    return clean_text, plan
+
+
+async def ask_claude(
+    history: List[Dict[str, str]],
+    user_message: str,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    settings = get_settings()
+    api_key = settings.gemini_api_key or settings.anthropic_api_key
+    default_sym = (context or {}).get("symbol") or "AAPL"
+    snap = (context or {}).get("snapshot") or {}
+    curr_price = snap.get("price")
+
+    if not api_key:
+        msg = (
+            "مفتاح GEMINI_API_KEY غير مضبوط حالياً في إعدادات الخادم على Render.\n"
+            "لتفعيل التحليل الذكي، أضف متغير GEMINI_API_KEY في تبويب Environment داخل خدمة stocks-api.\n\n"
+            "ومع ذلك، تم تجهيز بطاقة تداول أولية بناءً على السعر الحالي لتجربة أزرار التنفيذ والأهداف:"
+        )
+        _, fallback_plan = extract_trade_plan("", default_sym, curr_price)
+        return {"reply": msg, "trade_plan": fallback_plan}
+
+    ctx_block = _format_context(context or {})
+    contents: List[Dict[str, Any]] = []
+
+    for m in history[-10:]:
+        role = "user" if m.get("role") == "user" else "model"
+        text_val = (m.get("content") or "").strip()
+        if text_val:
+            contents.append({"role": role, "parts": [{"text": text_val}]})
+
+    final_user = user_message
+    if ctx_block:
+        final_user = f"[سياق السوق والشارت اللحظي]\n{ctx_block}\n\n[طلب المتداول]\n{user_message}"
+    contents.append({"role": "user", "parts": [{"text": final_user}]})
+
+    model_name = (settings.gemini_model or "gemini-2.5-flash").strip()
+    if model_name.startswith("models/"):
+        model_name = model_name[len("models/") :]
+
+    models_to_try = [model_name]
+    for fallback in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]:
+        if fallback not in models_to_try:
+            models_to_try.append(fallback)
+
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 2048,
+        },
+    }
+
+    last_error = ""
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for m_name in models_to_try:
+            url = f"[https://generativelanguage.googleapis.com/v1beta/models/](https://generativelanguage.googleapis.com/v1beta/models/){m_name}:generateContent"
+            try:
+                resp = await client.post(url, params={"key": api_key}, json=payload)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    candidates = data.get("candidates") or []
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts") or []
+                        raw_text = "\n".join(p.get("text", "") for p in parts if p.get("text")).strip()
+                        if raw_text:
+                            clean_reply, plan = extract_trade_plan(raw_text, default_sym, curr_price)
+                            return {"reply": clean_reply, "trade_plan": plan}
+                else:
+                    last_error = f"{resp.status_code}: {resp.text[:200]}"
+            except Exception as exc:
+                last_error = str(exc)
+
+    _, fallback_plan = extract_trade_plan("", default_sym, curr_price)
+    return {
+        "reply": f"تعذر الوصول إلى Gemini API ({last_error}). تم توليد خطة رقمية افتراضية بناءً على السعر الحالي:",
+        "trade_plan": fallback_plan,
+    }

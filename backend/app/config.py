@@ -1,47 +1,36 @@
-import os
-import secrets
+from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _db_url(raw: str) -> str:
-    """Normalize a database URL so SQLAlchemy uses the psycopg v3 driver."""
-    if raw.startswith("postgres://"):
-        raw = "postgresql://" + raw[len("postgres://"):]
-    if raw.startswith("postgresql://"):
-        raw = "postgresql+psycopg://" + raw[len("postgresql://"):]
-    return raw
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
+
+    app_username: str = "rayan"
+    app_password: str = "changeme"
+    session_secret: str = "change-this-secret-in-production"
+    cookie_secure: bool = False
+
+    alpaca_key_id: str = ""
+    alpaca_secret_key: str = ""
+    alpaca_trading_url: str = "https://paper-api.alpaca.markets"
+    alpaca_data_url: str = "https://data.alpaca.markets"
+    alpaca_data_feed: str = "iex"
+
+    # إعدادات Gemini API بدلاً من Anthropic
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-pro"
+
+    # إبقاء المتغير القديم اختيارياً لعدم كسر أي إعدادات سابقة
+    anthropic_api_key: str = ""
+    anthropic_model: str = ""
+
+    database_url: str = "sqlite:///./local.db"
+    frontend_origin: str = "http://localhost:3000"
+    alert_check_interval_seconds: int = 30
 
 
-class Settings:
-    def __init__(self) -> None:
-        # --- login (single user) ---
-        self.app_username = os.getenv("APP_USERNAME", "rayan")
-        self.app_password = os.getenv("APP_PASSWORD", "")
-        self.secret_key = os.getenv("SECRET_KEY") or secrets.token_urlsafe(48)
-        self.session_hours = int(os.getenv("SESSION_HOURS", "168"))
-        self.cookie_secure = os.getenv("COOKIE_SECURE", "false").lower() == "true"
-
-        # --- Alpaca ---
-        self.alpaca_key = os.getenv("ALPACA_KEY_ID", "")
-        self.alpaca_secret = os.getenv("ALPACA_SECRET_KEY", "")
-        # "iex" = free plan, "sip" = Algo Trader Plus (full market)
-        self.alpaca_feed = os.getenv("ALPACA_FEED", "iex")
-        self.alpaca_trading_url = os.getenv(
-            "ALPACA_TRADING_URL", "https://paper-api.alpaca.markets"
-        ).rstrip("/")
-        self.alpaca_data_url = os.getenv(
-            "ALPACA_DATA_URL", "https://data.alpaca.markets"
-        ).rstrip("/")
-
-        # --- database ---
-        self.database_url = _db_url(os.getenv("DATABASE_URL", "sqlite:///./local.db"))
-
-        # --- AI (add the key whenever you are ready) ---
-        self.anthropic_key = os.getenv("ANTHROPIC_API_KEY", "")
-        self.ai_model = os.getenv("AI_MODEL", "claude-sonnet-5-5")
-
-    @property
-    def is_paper(self) -> bool:
-        return "paper" in self.alpaca_trading_url
-
-
-settings = Settings()
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

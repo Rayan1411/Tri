@@ -1,63 +1,131 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
-from typing import Iterator, Optional
+from typing import Generator, Optional
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, create_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, create_engine, inspect, text
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-from .config import settings
-
-_kwargs = {}
-if settings.database_url.startswith("sqlite"):
-    _kwargs["connect_args"] = {"check_same_thread": False}
-else:
-    _kwargs["pool_pre_ping"] = True
-
-engine = create_engine(settings.database_url, **_kwargs)
-SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+from .config import get_settings
 
 
-def now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+def _normalize_db_url(url: str) -> str:
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+    if url.startswith("postgresql://") and "+psycopg" not in url:
+        url = url.replace("postgresql://", "postgresql+psycopg://", 1)
+    return url
 
 
-def iso(dt: Optional[datetime]) -> Optional[str]:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat()
+settings = get_settings()
+db_url = _normalize_db_url(settings.database_url)
+connect_args = {"check_same_thread": False} if db_url.startswith("sqlite") else {}
+
+engine = create_engine(db_url, pool_pre_ping=True, connect_args=connect_args)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 class Base(DeclarativeBase):
     pass
 
 
-class WatchItem(Base):
-    __tablename__ = "watchlist"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(16), unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-class Alert(Base):
-    __tablename__ = "alerts"
+class WatchlistItem(Base):
+    __tablename__ = "watchlist_items"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    symbol: Mapped[str] = mapped_column(String(16), index=True)
-    direction: Mapped[str] = mapped_column(String(8))  # "above" | "below"
-    price: Mapped[float] = mapped_column(Float)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), unique=True, index=True)
+    asset_class: Mapped[str] = mapped_column(String(16), default="stock", index=True)
+    note: Mapped[Optional[str]] = mapped_column(String(280), nullable=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PriceAlert(Base):
+    __tablename__ = "price_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    direction: Mapped[str] = mapped_column(String(8))  # "above" or "below"
+    target_price: Mapped[float] = mapped_column(Float)
+    note: Mapped[Optional[str]] = mapped_column(String(280), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    triggered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    triggered_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     triggered_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TradePlan(Base):
+    """جدول البوت الذكي لمراقبة وتنفيذ الهدف الأول والثاني ووقف الخسارة آلياً"""
+    __tablename__ = "trade_plans"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(24), index=True)
+    asset_class: Mapped[str] = mapped_column(String(16), default="stock")  # "stock" or "crypto"
+    side: Mapped[str] = mapped_column(String(8), default="buy")  # "buy" or "sell"
+    qty: Mapped[float] = mapped_column(Float)
+    remaining_qty: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float] = mapped_column(Float)
+    tp1_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tp2_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sl_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tp1_hit: Mapped[bool] = mapped_column(Boolean, default=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)  # active, completed, stopped, canceled
+    entry_order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[Optional[str]] = mapped_column(String(24), index=True, nullable=True)
+    role: Mapped[str] = mapped_column(String(16))  # "user" or "assistant"
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+DEFAULT_STOCKS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA", "AMD"]
+DEFAULT_CRYPTO = ["BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "DOGE-USD", "AVAX-USD"]
 
 
 def init_db() -> None:
-    Base.metadata.create_all(engine)
+    Base.metadata.create_all(bind=engine)
+    # ترقية تلقائية لقاعدة البيانات الحالية على Render لإضافة عمود asset_class إن لم يكن موجوداً
+    try:
+        insp = inspect(engine)
+        cols = [c["name"] for c in insp.get_columns("watchlist_items")]
+        if "asset_class" not in cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE watchlist_items ADD COLUMN asset_class VARCHAR(16) DEFAULT 'stock'")
+                )
+    except Exception:
+        pass
+
+    with SessionLocal() as db:
+        has_stocks = db.query(WatchlistItem).filter(WatchlistItem.asset_class == "stock").first()
+        if not has_stocks:
+            for sym in DEFAULT_STOCKS:
+                if not db.query(WatchlistItem).filter(WatchlistItem.symbol == sym).first():
+                    db.add(WatchlistItem(symbol=sym, asset_class="stock"))
+            db.commit()
+
+        has_crypto = db.query(WatchlistItem).filter(WatchlistItem.asset_class == "crypto").first()
+        if not has_crypto:
+            for sym in DEFAULT_CRYPTO:
+                if not db.query(WatchlistItem).filter(WatchlistItem.symbol == sym).first():
+                    db.add(WatchlistItem(symbol=sym, asset_class="crypto"))
+            db.commit()
 
 
-def get_db() -> Iterator:
+def get_db() -> Generator[Session, None, None]:
     db = SessionLocal()
     try:
         yield db

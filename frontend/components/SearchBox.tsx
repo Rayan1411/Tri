@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams } from "next/navigation";
-import React, { useEffect, useRef, useState } from "interface" in globalThis ? {} : {};
+import React, { useEffect, useRef, useState } from "react";
 
 interface SearchResult {
   symbol: string;
@@ -56,7 +56,7 @@ export default function SearchBox() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setOpen(true)}
-          placeholder={currentAssetClass === "crypto" ? "ابحث عن عملة رقمية (مثل BTC-USD, ETH)..." : "ابحث عن سهم أمريكي (مثل AAPL, TSLA)..."}
+          placeholder={currentAssetClass === "crypto" ? "ابحث عن عملة رقمية (مثل BTC-USD)..." : "ابحث عن سهم أمريكي (مثل AAPL)..."}
           className="w-full rounded bg-[#1e222d] px-3 py-1.5 text-xs text-white placeholder-[#787b86] outline-none border border-[#2a2e39] focus:border-[#2962ff]"
         />
         <span className="absolute left-2.5 top-2 text-xs text-[#787b86]">🔍</span>

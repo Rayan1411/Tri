@@ -1,6 +1,6 @@
 "use client";
 
-import { createChart, ColorType, IChartApi, ISeriesApi } from "lightweight-charts";
+import { createChart, ColorType, IChartApi, ISeriesApi, UTCTimestamp } from "lightweight-charts";
 import React, { useEffect, useRef, useState } from "react";
 
 interface Bar {
@@ -111,7 +111,7 @@ export default function StockChart({
     if (!seriesRef.current || !bars || bars.length === 0) return;
 
     const formatted = bars.map((b) => {
-      const timeVal = Math.floor(new Date(b.t).getTime() / 1000);
+      const timeVal = Math.floor(new Date(b.t).getTime() / 1000) as UTCTimestamp;
       return {
         time: timeVal,
         open: Number(b.o),
@@ -122,12 +122,11 @@ export default function StockChart({
     });
 
     formatted.sort((a, b) => (a.time as number) - (b.time as number));
-    // إزالة التكرار في طوابع الزمن إن وجد
     const unique = formatted.filter(
       (item, index, arr) => index === 0 || item.time !== arr[index - 1].time
     );
 
-    seriesRef.current.setData(unique);
+    seriesRef.current.setData(unique as any);
     if (chartRef.current) {
       chartRef.current.timeScale().fitContent();
     }
@@ -135,7 +134,6 @@ export default function StockChart({
 
   return (
     <div className="flex h-full w-full flex-col bg-[#131722] select-none">
-      {/* شريط الأدوات العلوي للشارت (الفواصل الزمنية والأداة) */}
       <div className="flex h-10 flex-none items-center justify-between border-b border-[#2a2e39] bg-[#1e222d] px-3">
         <div className="flex items-center space-x-1 space-x-reverse overflow-x-auto">
           <span className="text-xs font-bold text-white px-2">{symbol}</span>
@@ -159,11 +157,9 @@ export default function StockChart({
         </div>
       </div>
 
-      {/* منطقة رسم الشارت */}
       <div className="relative flex-1 w-full overflow-hidden">
         <div ref={chartContainerRef} className="absolute inset-0 h-full w-full" />
 
-        {/* عرض خطوط التداول النشطة للذكاء الاصطناعي على الشارت */}
         {tradePlans.length > 0 && (
           <div className="absolute top-2 right-2 z-10 flex flex-col space-y-1 bg-[#1e222d]/90 p-2 rounded border border-[#2a2e39] text-xs">
             <span className="font-bold text-amber-400">🎯 خطط التداول النشطة:</span>
